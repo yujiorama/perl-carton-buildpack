@@ -1,0 +1,12 @@
+api = "0.8"
+
+[buildpack]
+id = "yujiorama/perl-carton-buildpack"
+version = "0.0.1"
+sbom-formats = ["application/vnd.cyclonedx+json"]
+name = "Perl Carton Buildpack"
+homepage = "https://github.com/yujiorama/perl-carton-buildpack"
+
+[[stacks]]
+id = "io.buildpacks.stacks.bionic"
+mixins = ["build:build-essential", "build:git"]
