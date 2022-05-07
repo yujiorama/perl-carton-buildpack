@@ -2,7 +2,7 @@ api = "0.8"
 
 [buildpack]
 id = "yujiorama/perl-carton-buildpack"
-version = "0.0.1"
+version = "0.0.2"
 sbom-formats = ["application/vnd.cyclonedx+json"]
 name = "Perl Carton Buildpack"
 homepage = "https://github.com/yujiorama/perl-carton-buildpack"
