@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+
+set -x
+set -euo pipefail
+
+if [[ ! -f cpanfile.snapshot ]] || [[ ! -f cpanfile ]]; then
+  exit 100
+fi
+
+plan_path="$CNB_BUILD_PLAN_PATH"
+
+version=""
+version_source=""
+
+if [[ -z "$version" ]] && [[ -n "${BP_PERL_VERSION:-}" ]]; then
+  version="${BP_PERL_VERSION:-}"
+  version_source="\$BP_PERL_VERSION"
+fi
+
+if [[ -z "$version" ]] && [[ -s .perl-version ]]; then
+  version="$(cat .perl-version)"
+  version_source="perl-version"
+fi
+
+if [[ -z "$version" ]]; then
+  version="5.34.1"
+  version_source="default"
+fi
+
+cat >> "$plan_path" <<EOF
+[[provides]]
+name = "perl"
+
+[[provides]]
+name = "xbuild"
+
+[[provides]]
+name = "carton"
+
+[[requires]]
+name = "perl"
+
+[requires.metadata]
+version = "${version}"
+version_source = "${version_source}"
+
+[[requires]]
+name = "xbuild"
+
+[[requires]]
+name = "carton"
+EOF

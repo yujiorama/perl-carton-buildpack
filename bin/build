@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+layers_dir="$1"
+env_dir="$2/env"
+plan_path="$3"
+
+echo "---> Perl-Carton Buildpack"
+perl_layer="$layers_dir"/perl
+mkdir -p "$perl_layer"
+
+xbuild_layer_dir="$layers_dir"/xbuild
+mkdir -p "$xbuild_layer_dir"
+
+carton_layer="$layers_dir"/carton
+mkdir -p "$carton_layer"
+
+echo "---> Configure xbuild layer"
+if [[ -f "$layers_dir"/xbuild.toml ]]; then
+  echo "---> Reuse cache"
+else
+  echo "---> Install https://github.com/tagomoris/xbuild"
+  git clone --depth=1 "https://github.com/tagomoris/xbuild" "$xbuild_layer_dir"/bin
+fi
+
+cat - > "$layers_dir"/xbuild.toml <<EOL
+[types]
+build = true
+launch = false
+cache = true
+EOL
+
+export PATH="$xbuild_layer_dir"/bin:$PATH
+
+echo "---> Configure perl layer"
+# shellcheck disable=SC2002
+version=$(cat "${plan_path}" | yj -t | jq -r '.entries[] | select(.name == "perl") | .metadata.version')
+
+if [[ -f "$layers_dir"/perl.toml ]]; then
+  echo "---> Reuse cache"
+  # shellcheck disable=SC2002
+  version="$(cat "$layers_dir"/perl.toml | yj -t | jq -r '.metadata.version' 2>/dev/null)"
+  version_source="cache"
+else
+  # shellcheck disable=SC2002
+  version_source=$(cat "${plan_path}" | yj -t | jq -r '.entries[] | select(.name == "perl") | .metadata.version_source')
+  echo "---> Install Perl(version:${version} source:${version_source})"
+  "$xbuild_layer_dir"/bin/install perl "$version" "$perl_layer"
+fi
+
+cat - > "$layers_dir"/perl.toml <<EOL
+[types]
+build = true
+launch = true
+cache = true
+[metadata]
+version = "$version"
+EOL
+
+perl_sbom="$layers_dir"/perl.sbom.cdx.json
+cat - > "$perl_sbom" <<EOL
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.4",
+  "version": 1,
+  "components": [
+    {
+      "type": "library",
+      "name": "perl",
+      "version": "$version"
+    }
+  ]
+}
+EOL
+
+mkdir -p "$perl_layer"/env "$perl_layer"/env.build "$perl_layer"/env.launch
+export PATH="$perl_layer"/bin:$PATH
+export PERL5LIB="$perl_layer"/lib/perl5
+echo -n "$PERL5LIB" | tee "$perl_layer"/env.build/PERL5LIB.prepend | tee "$perl_layer"/env.launch/PERL5LIB.prepend
+
+echo "---> Configure carton layer"
+export PERL_CARTON_PATH="$carton_layer"
+if [[ -f "$layers_dir"/carton.toml ]]; then
+  echo "---> Reuse cache"
+else
+  echo "---> Install dependencies with Carton"
+  if [[ -f cpanfile.snapshot ]]; then
+    carton_checksum=$(sha256sum cpanfile.snapshot | cut -d ' ' -f 1)
+    # shellcheck disable=SC2002
+    cached_carton_checksum=$(cat "$layers_dir"/carton.toml | yj -t | jq -r .metadata.checksum 2>/dev/null || echo 'not found')
+    if [[ "$carton_checksum" != "$cached_carton_checksum" ]]; then
+      carton install --deployment
+    fi
+  elif [[ -f cpanfile ]]; then
+    carton install
+  fi
+
+fi
+
+carton_checksum=$(sha256sum cpanfile.snapshot | cut -d ' ' -f 1)
+cat - > "$layers_dir"/carton.toml <<EOL
+[types]
+build = true
+launch = true
+cache = true
+
+[metadata]
+checksum = "$carton_checksum"
+EOL
+
+plack_found=""
+for module in $(carton list); do
+  v=${module##*-}
+  n=${module%-${v}}
+  dep=$(jq --arg name "$n" --arg version "$v" \
+    '.components[.components | length] |= . + {"type":"library","name":$name,"version":$version}'\
+  "$perl_sbom")
+  echo "$dep" > "$perl_sbom"
+  [[ "$n" = "Plack" ]] && plack_found="1"
+done
+
+mkdir -p "$carton_layer"/env "$carton_layer"/env.build "$carton_layer"/env.launch
+export PATH="$carton_layer"/bin:$PATH
+export PERL_CARTON_PATH="$carton_layer"
+echo -n "$PERL_CARTON_PATH" | tee "$carton_layer"/env.build/PERL_CARTON_PATH.default | tee "$carton_layer"/env.launch/PERL_CARTON_PATH.default
+
+echo "---> Configure launch"
+if [[ -n "$plack_found" ]]; then
+  entrypoint=$(find . -maxdepth 1 -name "*.psgi" -type f| sort | head -n 1)
+  if [[ -s "$entrypoint" ]]; then
+    cat - >> "$layers_dir"/launch.toml <<EOL
+[[processes]]
+type = "web"
+command = "carton exec plackup $entrypoint"
+default = true
+EOL
+  fi
+fi
+
+find . -maxdepth 1 -name "*.pl" -type f | sort | while read -r entrypoint; do
+  entrypoint_name=$(basename "$entrypoint" .pl)
+  if [[ -s "$entrypoint" ]]; then
+    cat - >> "$layers_dir"/launch.toml <<EOL
+[[processes]]
+type = "$entrypoint_name"
+command = "carton exec perl $entrypoint"
+EOL
+  fi
+done
